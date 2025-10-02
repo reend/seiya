@@ -8,7 +8,7 @@ CC=clang
 CFLAGS="-std=c11 -O2 -g3 -Wall -Wextra --target=riscv32-unknown-elf -fno-stack-protector -ffreestanding -nostdlib"
 
 # Path to llvm-objcopy
-OBJCOPY=/opt/homebrew/opt/llvm/bin/llvm-objcopy
+OBJCOPY=llvm-objcopy
 
 # Build the shell (application)
 $CC $CFLAGS -Wl,-Tuser.ld -Wl,-Map=shell.map -o shell.elf shell.c user.c common.c
