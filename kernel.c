@@ -159,12 +159,108 @@ __asm__ __volatile__(
 );
 }
 
+struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
+    long arg5, long fid, long eid) {
+register long a0 __asm__("a0") = arg0;
+register long a1 __asm__("a1") = arg1;
+register long a2 __asm__("a2") = arg2;
+register long a3 __asm__("a3") = arg3;
+register long a4 __asm__("a4") = arg4;
+register long a5 __asm__("a5") = arg5;
+register long a6 __asm__("a6") = fid;
+register long a7 __asm__("a7") = eid;
+
+__asm__ __volatile__("ecall"
+      : "=r"(a0), "=r"(a1)
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5),
+        "r"(a6), "r"(a7)
+      : "memory");
+return (struct sbiret){.error = a0, .value = a1};
+}
+
+struct process *current_proc; // Currently running process
+struct process *idle_proc;    // Idle process
+
+void yield(void) {
+    // Search for a runnable process
+    struct process *next = idle_proc;
+    for (int i = 0; i < PROCS_MAX; i++) {
+        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+            next = proc;
+            break;
+        }
+    }
+
+    // If there's no runnable process other than the current one, return and continue processing
+    if (next == current_proc)
+        return;
+
+    __asm__ __volatile__(
+        "sfence.vma\n"
+        "csrw satp, %[satp]\n"
+        "sfence.vma\n"
+        "csrw sscratch, %[sscratch]\n"
+        :
+        // Don't forget the trailing comma!
+        : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
+          [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    );
+
+    // Context switch
+    struct process *prev = current_proc;
+    current_proc = next;
+    switch_context(&prev->sp, &next->sp);
+}
+
+void putchar(char ch) {
+    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+}
+
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
+}
+
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+        case SYS_GETCHAR:
+            while (1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+
+                yield();
+            }
+            break;
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
+        case SYS_EXIT:
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable");
+        default:
+            PANIC("unexpected syscall a3=%x\n", f->a3);
+    }
+}
+
 void handle_trap(struct trap_frame *f) {
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
     uint32_t user_pc = READ_CSR(sepc);
 
-    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    if (scause == SCAUSE_ECALL) {
+        handle_syscall(f);
+        user_pc += 4;
+    } else {
+        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    }
+
+    WRITE_CSR(sepc, user_pc);
 }
 
 __attribute__((naked))
@@ -248,64 +344,6 @@ void kernel_entry(void) {
         "lw sp,  4 * 30(sp)\n"
         "sret\n"
     );
-}
-
-struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
-    long arg5, long fid, long eid) {
-register long a0 __asm__("a0") = arg0;
-register long a1 __asm__("a1") = arg1;
-register long a2 __asm__("a2") = arg2;
-register long a3 __asm__("a3") = arg3;
-register long a4 __asm__("a4") = arg4;
-register long a5 __asm__("a5") = arg5;
-register long a6 __asm__("a6") = fid;
-register long a7 __asm__("a7") = eid;
-
-__asm__ __volatile__("ecall"
-      : "=r"(a0), "=r"(a1)
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5),
-        "r"(a6), "r"(a7)
-      : "memory");
-return (struct sbiret){.error = a0, .value = a1};
-}
-
-void putchar(char ch) {
-    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
-}
-
-struct process *current_proc; // Currently running process
-struct process *idle_proc;    // Idle process
-
-void yield(void) {
-    // Search for a runnable process
-    struct process *next = idle_proc;
-    for (int i = 0; i < PROCS_MAX; i++) {
-        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
-        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
-            next = proc;
-            break;
-        }
-    }
-
-    // If there's no runnable process other than the current one, return and continue processing
-    if (next == current_proc)
-        return;
-
-    __asm__ __volatile__(
-        "sfence.vma\n"
-        "csrw satp, %[satp]\n"
-        "sfence.vma\n"
-        "csrw sscratch, %[sscratch]\n"
-        :
-        // Don't forget the trailing comma!
-        : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
-          [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
-    );
-
-    // Context switch
-    struct process *prev = current_proc;
-    current_proc = next;
-    switch_context(&prev->sp, &next->sp);
 }
 
 void delay(void) {
