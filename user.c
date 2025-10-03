@@ -1,5 +1,13 @@
 #include "user.h"
 
+int readfile(const char *filename, char *buf, int len) {
+    return syscall(SYS_READFILE, (int) filename, (int) buf, len);
+}
+
+int writefile(const char *filename, const char *buf, int len) {
+    return syscall(SYS_WRITEFILE, (int) filename, (int) buf, len);
+}
+
 extern char __stack_top[];
 
 __attribute__((noreturn)) void exit(void) {
